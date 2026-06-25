@@ -1,4 +1,4 @@
-"""Split WhisperX segments into shorter or longer subtitle chunks."""
+"""Split WhisperX segments into short-form or long-form subtitle chunks."""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ PRESET_SHORTFORM = "shortform"
 PRESET_LONGFORM = "longform"
 VALID_PRESETS = {PRESET_SHORTFORM, PRESET_LONGFORM}
 
-# Word-count targets per subtitle block.
+# (max_words, max_chars, pause_threshold_seconds)
 PRESET_TARGETS = {
-    PRESET_SHORTFORM: (2, 5),   # min, max
-    PRESET_LONGFORM: (10, 14),  # min, max
+    PRESET_SHORTFORM: (4, 22, 0.45),
+    PRESET_LONGFORM: (14, 80, 0.45),
 }
 
 
@@ -22,37 +22,25 @@ def _sanitize_text(text: str) -> str:
     return " ".join(text.split())
 
 
-def _words_from_segment(segment: dict) -> list[dict]:
-    """Extract a clean list of word dicts from a WhisperX segment.
-
-    Each word dict should have ``word`` and optionally ``start``/``end``.
-    """
-    raw_words = segment.get("words", [])
-    words = []
-    for word_entry in raw_words:
-        if isinstance(word_entry, dict):
-            word_text = word_entry.get("word", "").strip()
-        else:
-            word_text = str(word_entry).strip()
-        if word_text:
-            words.append({"word": word_text, **word_entry} if isinstance(word_entry, dict) else {"word": word_text})
+def _collect_words(segments: Iterable[dict]) -> list[dict]:
+    """Collect all timed words from WhisperX segments in order."""
+    words: list[dict] = []
+    for segment in segments:
+        for word in segment.get("words", []):
+            if not isinstance(word, dict):
+                continue
+            word_text = word.get("word", "").strip()
+            if not word_text:
+                continue
+            if "start" not in word or "end" not in word:
+                continue
+            words.append({
+                "word": word_text,
+                "start": float(word["start"]),
+                "end": float(word["end"]),
+                "speaker": word.get("speaker"),
+            })
     return words
-
-
-def _split_text_evenly(text: str, chunk_count: int) -> list[str]:
-    """Split text into ``chunk_count`` roughly equal word groups."""
-    tokens = text.split()
-    if chunk_count <= 1 or len(tokens) <= chunk_count:
-        return [text]
-
-    base_size, remainder = divmod(len(tokens), chunk_count)
-    chunks = []
-    index = 0
-    for i in range(chunk_count):
-        size = base_size + (1 if i < remainder else 0)
-        chunks.append(" ".join(tokens[index : index + size]))
-        index += size
-    return chunks
 
 
 def _dominant_speaker(words: list[dict]) -> str | None:
@@ -70,67 +58,86 @@ def _prefix_speaker(text: str, speaker: str | None) -> str:
     return f"[{speaker}] {text}"
 
 
-def _split_segment(
-    segment: dict,
-    min_words: int,
+def _group_words(
+    words: list[dict],
     max_words: int,
-) -> list[dict]:
-    """Split a single WhisperX segment into subtitle-sized chunks.
+    max_chars: int,
+    pause_threshold: float,
+) -> list[list[dict]]:
+    """Group timed words into subtitle-sized chunks.
 
-    Word-level timings are used when available. If not, the segment's total
-    duration is divided proportionally among the chunks.
+    A new chunk is started when any of the following is true:
+    - the current chunk already has ``max_words`` words,
+    - the joined text would reach ``max_chars`` characters,
+    - the pause between the current and previous word exceeds
+      ``pause_threshold`` seconds,
+    - the speaker changes.
     """
-    words = _words_from_segment(segment)
-    segment_start = float(segment.get("start", 0.0))
-    segment_end = float(segment.get("end", segment_start))
-
-    if not words:
-        cleaned = _sanitize_text(str(segment.get("text", "")))
-        if cleaned:
-            return [{"start": segment_start, "end": segment_end, "text": cleaned}]
-        return []
-
-    # Build chunks based on word count targets.
-    chunks: list[list[dict]] = []
-    current_chunk: list[dict] = []
+    groups: list[list[dict]] = []
+    current: list[dict] = []
 
     for word in words:
-        current_chunk.append(word)
-        if len(current_chunk) >= max_words:
-            chunks.append(current_chunk)
-            current_chunk = []
+        # Start a new group on speaker change.
+        if current and current[-1].get("speaker") != word.get("speaker"):
+            groups.append(current)
+            current = []
 
-    if current_chunk:
-        # Merge a tiny trailing chunk with the previous one if possible.
-        if len(current_chunk) < min_words and chunks:
-            chunks[-1].extend(current_chunk)
-        else:
-            chunks.append(current_chunk)
+        current.append(word)
 
-    # Resolve timings per chunk.
+        text = " ".join(w["word"].strip() for w in current)
+
+        pause = False
+        if len(current) >= 2:
+            gap = current[-1]["start"] - current[-2]["end"]
+            if gap > pause_threshold:
+                pause = True
+
+        if len(current) >= max_words or len(text) >= max_chars or pause:
+            groups.append(current)
+            current = []
+
+    if current:
+        groups.append(current)
+
+    return groups
+
+
+def _fallback_split_segment(segment: dict, max_words: int) -> list[dict]:
+    """Split a segment without per-word timings by text alone."""
+    text = _sanitize_text(str(segment.get("text", "")))
+    if not text:
+        return []
+
+    tokens = text.split()
+    if len(tokens) <= max_words:
+        return [{
+            "start": float(segment.get("start", 0.0)),
+            "end": float(segment.get("end", 0.0)),
+            "text": text,
+        }]
+
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        current.append(token)
+        if len(current) >= max_words:
+            chunks.append(current)
+            current = []
+    if current:
+        chunks.append(current)
+
+    segment_start = float(segment.get("start", 0.0))
+    segment_end = float(segment.get("end", segment_start))
+    duration = segment_end - segment_start
     result = []
-    for chunk in chunks:
-        text_words = [w["word"].strip() for w in chunk]
-        text = _sanitize_text(" ".join(text_words))
-        if not text:
-            continue
-
-        timed_words = [w for w in chunk if isinstance(w, dict) and w.get("start") is not None and w.get("end") is not None]
-        if timed_words:
-            start = float(timed_words[0]["start"])
-            end = float(timed_words[-1]["end"])
-        else:
-            # Fallback: divide the segment duration proportionally.
-            ratio = max(1, len(chunk)) / max(1, len(words))
-            duration = segment_end - segment_start
-            chunk_index = chunks.index(chunk)
-            start = segment_start + duration * (chunk_index / len(chunks))
-            end = segment_start + duration * ((chunk_index + 1) / len(chunks))
-
-        speaker = _dominant_speaker(chunk)
-        text = _prefix_speaker(text, speaker)
-        result.append({"start": start, "end": end, "text": text})
-
+    for i, chunk in enumerate(chunks):
+        start = segment_start + duration * (i / len(chunks))
+        end = segment_start + duration * ((i + 1) / len(chunks))
+        result.append({
+            "start": start,
+            "end": end,
+            "text": " ".join(chunk),
+        })
     return result
 
 
@@ -138,7 +145,7 @@ def split_segments(
     segments: Iterable[dict],
     preset: str = PRESET_SHORTFORM,
 ) -> list[dict]:
-    """Split or join WhisperX segments according to the chosen preset.
+    """Split WhisperX segments according to the chosen preset.
 
     Parameters
     ----------
@@ -156,10 +163,27 @@ def split_segments(
         valid = ", ".join(sorted(VALID_PRESETS))
         raise ValueError(f"Unknown preset '{preset}'. Choose from: {valid}")
 
-    min_words, max_words = PRESET_TARGETS[preset]
+    max_words, max_chars, pause_threshold = PRESET_TARGETS[preset]
+    segments = list(segments)
 
+    words = _collect_words(segments)
+
+    if words:
+        groups = _group_words(words, max_words, max_chars, pause_threshold)
+        return [
+            {
+                "start": group[0]["start"],
+                "end": group[-1]["end"],
+                "text": _prefix_speaker(
+                    _sanitize_text(" ".join(w["word"].strip() for w in group)),
+                    _dominant_speaker(group),
+                ),
+            }
+            for group in groups
+        ]
+
+    # No timed words available — fall back to splitting by text.
     output: list[dict] = []
     for segment in segments:
-        output.extend(_split_segment(segment, min_words, max_words))
-
+        output.extend(_fallback_split_segment(segment, max_words))
     return output

@@ -67,7 +67,7 @@ def test_cli_version_long():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
     assert "subeng" in result.output
-    assert "0.1.2" in result.output
+    assert "0.1.3" in result.output
 
 
 def test_cli_version_short():
@@ -79,7 +79,7 @@ def test_cli_version_short():
 def test_cli_version_no_extra_output():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert result.output.strip() == "subeng 0.1.2"
+    assert result.output.strip() == "subeng 0.1.3"
 
 
 def test_cli_quiet_hides_status_but_keeps_errors(tmp_path: Path):

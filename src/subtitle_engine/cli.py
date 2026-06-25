@@ -239,13 +239,13 @@ def main(
             verbose=verbose,
         )
 
-        segments = split_segments(segments, preset=preset)
-        write_srt(segments, output_path)
+        splitted_segments = split_segments(segments, preset=preset)
+        write_srt(splitted_segments, output_path)
         if not quiet:
             console.print(f"[green]Wrote subtitles to:[/green] {output_path}")
 
         if caption:
-            transcript = " ".join(str(segment.get("text", "")).strip() for segment in segments)
+            transcript = " ".join(str(segment.get("text", "")).strip() for segment in splitted_segments)
             caption_text = generate_caption(
                 transcript,
                 model=ollama_model,
