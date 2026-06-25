@@ -2,9 +2,12 @@
 
 from pathlib import Path
 
+import pytest
+
 from subtitle_engine.srt_writer import (
     _format_segment,
     _format_time,
+    extract_text_from_srt,
     segments_to_srt,
     write_srt,
 )
@@ -64,3 +67,48 @@ def test_write_srt_creates_parent_dirs(tmp_path: Path):
     output = tmp_path / "nested" / "dir" / "subs.srt"
     write_srt(segments, output)
     assert output.exists()
+
+
+def test_extract_text_from_srt(tmp_path: Path):
+    srt = tmp_path / "subs.srt"
+    srt.write_text(
+        "1\n00:00:00,000 --> 00:00:02,000\nHello world\n\n"
+        "2\n00:00:03,000 --> 00:00:05,000\nSecond line\n",
+        encoding="utf-8",
+    )
+    assert extract_text_from_srt(srt) == "Hello world Second line"
+
+
+def test_extract_text_from_srt_multiline_text(tmp_path: Path):
+    srt = tmp_path / "subs.srt"
+    srt.write_text(
+        "1\n00:00:00,000 --> 00:00:04,000\nFirst line\nSecond line\n",
+        encoding="utf-8",
+    )
+    assert extract_text_from_srt(srt) == "First line Second line"
+
+
+def test_extract_text_from_srt_ignores_blank_blocks(tmp_path: Path):
+    srt = tmp_path / "subs.srt"
+    srt.write_text(
+        "1\n00:00:00,000 --> 00:00:02,000\nHello\n\n"
+        "2\n00:00:03,000 --> 00:00:05,000\n   \n",
+        encoding="utf-8",
+    )
+    assert extract_text_from_srt(srt) == "Hello"
+
+
+def test_extract_text_from_srt_missing_file(tmp_path: Path):
+    missing = tmp_path / "missing.srt"
+    with pytest.raises(FileNotFoundError):
+        extract_text_from_srt(missing)
+
+
+def test_extract_text_from_srt_no_text(tmp_path: Path):
+    srt = tmp_path / "subs.srt"
+    srt.write_text(
+        "1\n00:00:00,000 --> 00:00:02,000\n   \n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="No subtitle text"):
+        extract_text_from_srt(srt)

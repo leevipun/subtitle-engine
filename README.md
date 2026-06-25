@@ -41,6 +41,9 @@ subeng video.mp4 --diarize --hf-token $HF_TOKEN
 # Generate a caption from the transcript using Ollama
 subeng video.mp4 --caption --ollama-model qwen3.5:0.6b
 
+# Generate a caption from an existing SRT file
+subeng caption subtitles.srt
+
 # Short-form subtitles (2-5 words per line, default)
 subeng video.mp4 --preset shortform
 
@@ -61,8 +64,9 @@ subeng video.mp4 --preset longform
 | `--diarize` | Enable speaker diarization |
 | `--hf-token` | Hugging Face token for diarization (or set `HF_TOKEN` env var) |
 | `--caption` | Generate a caption from the transcript via Ollama |
-| `--ollama-model` | Ollama model name (required with `--caption`) |
+| `--ollama-model` | Ollama model name. If omitted, installed models are listed and you can pick one. |
 | `--ollama-host` | Ollama API host (default: `http://localhost:11434`) |
+| `caption` | Generate a caption from an existing SRT file (e.g. `subeng caption file.srt`) |
 | `--preset`, `-p` | Subtitle style: `shortform` (2-5 words, default) or `longform` (10-14 words) |
 
 ## Development

@@ -1,5 +1,6 @@
 """Convert transcription segments to SRT format."""
 
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -36,6 +37,48 @@ def segments_to_srt(segments: Iterable[dict]) -> str:
         text = str(segment["text"])
         blocks.append(_format_segment(index, start, end, text))
     return "\n".join(blocks)
+
+
+def extract_text_from_srt(path: Path) -> str:
+    """Read an SRT file and return the spoken text as a single string.
+
+    Parameters
+    ----------
+    path:
+        Path to the SRT file to read.
+
+    Returns
+    -------
+    The transcript text with subtitle lines joined by spaces.
+
+    Raises
+    ------
+    FileNotFoundError:
+        If the SRT file does not exist.
+    ValueError:
+        If no subtitle text can be extracted from the file.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"SRT file not found: {path}")
+
+    content = path.read_text(encoding="utf-8")
+    blocks = re.split(r"\n\s*\n", content.strip())
+
+    texts: list[str] = []
+    for block in blocks:
+        lines = block.strip().splitlines()
+        # A valid block has at least an index, a timecode line, and one text line.
+        if len(lines) < 3:
+            continue
+        text = " ".join(line.strip() for line in lines[2:] if line.strip())
+        if text:
+            texts.append(text)
+
+    if not texts:
+        raise ValueError(f"No subtitle text found in {path}")
+
+    return " ".join(texts)
 
 
 def write_srt(segments: Iterable[dict], output_path: Path) -> None:

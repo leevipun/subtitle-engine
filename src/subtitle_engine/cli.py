@@ -4,13 +4,15 @@ import sys
 from pathlib import Path
 from typing import Annotated, Optional
 
+import questionary
+import requests
 import typer
 from rich.console import Console
 
 from subtitle_engine import __version__
-from subtitle_engine.captioner import generate_caption
+from subtitle_engine.captioner import generate_caption, list_models
 from subtitle_engine.segmenter import VALID_PRESETS, split_segments
-from subtitle_engine.srt_writer import write_srt
+from subtitle_engine.srt_writer import extract_text_from_srt, write_srt
 from subtitle_engine.transcriber import transcribe
 from subtitle_engine.updater import UpdateCheckError, check_for_update, update_package
 from subtitle_engine.utils import resolve_output_path, validate_media_file
@@ -20,6 +22,30 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+def _select_ollama_model(host: str) -> str:
+    """List available Ollama models and prompt the user to pick one."""
+    try:
+        models = list_models(host)
+    except requests.RequestException as exc:
+        raise ConnectionError(
+            f"Could not connect to Ollama at {host}. Is Ollama running?"
+        ) from exc
+
+    if not models:
+        raise ConnectionError(f"No Ollama models found at {host}.")
+
+    choice = questionary.select(
+        "Select an Ollama model:",
+        choices=models,
+        default=models[0],
+    ).ask()
+
+    if choice is None:
+        raise ValueError("No model selected")
+
+    return choice
 
 
 def _version_callback(value: bool) -> None:
@@ -54,14 +80,27 @@ def update() -> None:
 
 
 def main_entry() -> None:
-    """Route ``subeng update`` to the updater; otherwise run the Typer app."""
+    """Route subcommands; default to the ``main`` transcription command."""
+    if len(sys.argv) > 1 and sys.argv[1] in ("-v", "--version"):
+        console.print(f"subeng {__version__}")
+        return
     if len(sys.argv) > 1 and sys.argv[1] == "update":
         update()
-    else:
-        app()
+        return
+
+    # If the user did not supply a subcommand (or global option), default to ``main``.
+    args = sys.argv.copy()
+    if (
+        len(args) > 1
+        and not args[1].startswith("-")
+        and args[1] not in ("main", "caption")
+    ):
+        args.insert(1, "main")
+    app(args[1:])
 
 
 @app.command(
+    name="main",
     epilog="Run 'subeng update' to update to the latest version.",
 )
 def main(
@@ -152,7 +191,7 @@ def main(
         Optional[str],
         typer.Option(
             "--ollama-model",
-            help="Ollama model for caption generation. Required if --caption is set.",
+            help="Ollama model for caption generation. If omitted, installed models are listed.",
         ),
     ] = None,
     ollama_host: Annotated[
@@ -207,7 +246,7 @@ def main(
         output_path = resolve_output_path(input_file, output)
 
         if caption and not ollama_model:
-            raise ValueError("--ollama-model is required when using --caption")
+            ollama_model = _select_ollama_model(ollama_host)
 
         if not quiet:
             update_info = check_for_update()
@@ -260,6 +299,77 @@ def main(
         raise typer.Exit(code=1) from exc
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]Transcription failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+
+@app.command(name="caption")
+def caption_command(
+    input_file: Annotated[
+        Path,
+        typer.Argument(
+            help="SRT file to generate a caption from",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ],
+    output: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output caption file (default: <input>.caption.txt)",
+            file_okay=True,
+            dir_okay=False,
+        ),
+    ] = None,
+    ollama_model: Annotated[
+        Optional[str],
+        typer.Option(
+            "--ollama-model",
+            "-m",
+            help="Ollama model for caption generation",
+        ),
+    ] = None,
+    ollama_host: Annotated[
+        str,
+        typer.Option(
+            "--ollama-host",
+            help="Ollama API host",
+            envvar="OLLAMA_HOST",
+        ),
+    ] = "http://localhost:11434",
+    quiet: Annotated[
+        bool,
+        typer.Option(
+            "--quiet",
+            "-q",
+            help="Only print errors.",
+        ),
+    ] = False,
+) -> None:
+    """Generate a caption from an existing SRT file."""
+    try:
+        if not ollama_model:
+            ollama_model = _select_ollama_model(ollama_host)
+
+        transcript = extract_text_from_srt(input_file)
+        caption_text = generate_caption(
+            transcript,
+            model=ollama_model,
+            host=ollama_host,
+        )
+
+        caption_path = output or input_file.with_suffix(".caption.txt")
+        caption_path.write_text(caption_text, encoding="utf-8")
+        if not quiet:
+            console.print(f"[green]Wrote caption to:[/green] {caption_path}")
+    except (ValueError, FileNotFoundError, ConnectionError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Caption generation failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
 
