@@ -72,7 +72,7 @@ def test_cli_version_long():
     result = runner.invoke(app, ["main", "--version"])
     assert result.exit_code == 0
     assert "subeng" in result.output
-    assert "0.1.3" in result.output
+    assert __version__ in result.output
 
 
 def test_cli_version_short():
@@ -272,3 +272,11 @@ def test_caption_command_no_models_raises(tmp_path: Path):
         result = runner.invoke(app, ["caption", str(srt)])
     assert result.exit_code != 0
     assert "No Ollama models" in result.output
+
+
+def test_caption_command_rejects_non_srt_input(tmp_path: Path):
+    video = tmp_path / "video.mov"
+    video.write_bytes(b"\x00\xe0not an srt")
+    result = runner.invoke(app, ["caption", str(video), "--ollama-model", "llama3.2"])
+    assert result.exit_code != 0
+    assert "expects an .srt file" in result.output

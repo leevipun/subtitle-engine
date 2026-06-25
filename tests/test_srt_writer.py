@@ -112,3 +112,11 @@ def test_extract_text_from_srt_no_text(tmp_path: Path):
     )
     with pytest.raises(ValueError, match="No subtitle text"):
         extract_text_from_srt(srt)
+
+
+def test_extract_text_from_srt_handles_non_utf8_bytes(tmp_path: Path):
+    srt = tmp_path / "subs.srt"
+    srt.write_bytes(
+        b"1\n00:00:00,000 --> 00:00:02,000\nHello \xe0 world\n"
+    )
+    assert extract_text_from_srt(srt) == "Hello \ufffd world"

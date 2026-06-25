@@ -351,6 +351,12 @@ def caption_command(
 ) -> None:
     """Generate a caption from an existing SRT file."""
     try:
+        if input_file.suffix.lower() != ".srt":
+            raise ValueError(
+                f"caption expects an .srt file, got '{input_file.suffix}'. "
+                "Use 'subeng main <video> --caption' to generate a caption from a video file."
+            )
+
         if not ollama_model:
             ollama_model = _select_ollama_model(ollama_host)
 

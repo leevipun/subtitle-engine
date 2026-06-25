@@ -62,7 +62,7 @@ def extract_text_from_srt(path: Path) -> str:
     if not path.exists():
         raise FileNotFoundError(f"SRT file not found: {path}")
 
-    content = path.read_text(encoding="utf-8")
+    content = path.read_text(encoding="utf-8", errors="replace")
     blocks = re.split(r"\n\s*\n", content.strip())
 
     texts: list[str] = []
