@@ -1,3 +1,3 @@
 """Subtitle Engine — generate SRT files with WhisperX."""
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

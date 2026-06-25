@@ -32,7 +32,7 @@ subeng video.mp4 --output subtitles.srt
 # Use a different model or language
 subeng video.mp4 --model medium --language fi
 
-# Force CPU / CUDA / MPS
+# Force CPU / CUDA
 subeng video.mp4 --device cpu
 
 # Speaker diarization (requires a Hugging Face token)
@@ -49,7 +49,7 @@ subeng video.mp4 --caption --ollama-model qwen3.5:0.8b
 | `--output`, `-o` | Output SRT file path |
 | `--model`, `-m` | WhisperX model: `tiny`, `base`, `small` (default), `medium`, `large-v2`, `large-v3` |
 | `--language`, `-l` | ISO language code, e.g. `en`, `fi`. Auto-detected if omitted. |
-| `--device`, `-d` | `cpu`, `cuda` or `mps`. Auto-detected if omitted. |
+| `--device`, `-d` | `cpu` or `cuda`. Auto-detected if omitted. |
 | `--batch-size`, `-b` | Inference batch size (default: 16) |
 | `--compute-type`, `-c` | `int8` or `float16`. Auto-selected if omitted. |
 | `--diarize` | Enable speaker diarization |

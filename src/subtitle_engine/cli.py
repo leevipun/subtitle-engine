@@ -6,6 +6,7 @@ from typing import Annotated, Optional
 import typer
 from rich.console import Console
 
+from subtitle_engine import __version__
 from subtitle_engine.captioner import generate_caption
 from subtitle_engine.srt_writer import write_srt
 from subtitle_engine.transcriber import transcribe
@@ -16,6 +17,12 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        console.print(f"subeng {__version__}")
+        raise typer.Exit()
 
 
 @app.command()
@@ -61,7 +68,7 @@ def main(
         typer.Option(
             "--device",
             "-d",
-            help="Device: cpu, cuda or mps. Auto-detected if omitted.",
+            help="Device: cpu or cuda. Auto-detected if omitted.",
         ),
     ] = None,
     batch_size: Annotated[
@@ -118,6 +125,31 @@ def main(
             envvar="OLLAMA_HOST",
         ),
     ] = "http://localhost:11434",
+    quiet: Annotated[
+        bool,
+        typer.Option(
+            "--quiet",
+            "-q",
+            help="Only print errors.",
+        ),
+    ] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose",
+            help="Show WhisperX progress bars and warnings.",
+        ),
+    ] = False,
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-v",
+            help="Show the version and exit.",
+            callback=_version_callback,
+            is_eager=True,
+        ),
+    ] = False,
 ) -> None:
     """Generate SRT subtitles from a media file."""
     try:
@@ -127,12 +159,13 @@ def main(
         if caption and not ollama_model:
             raise ValueError("--ollama-model is required when using --caption")
 
-        console.print(f"[bold]Transcribing:[/bold] {input_file}")
-        console.print(f"[bold]Model:[/bold] {model}")
-        if language:
-            console.print(f"[bold]Language:[/bold] {language}")
-        if device:
-            console.print(f"[bold]Device:[/bold] {device}")
+        if not quiet:
+            console.print(f"[bold]Transcribing:[/bold] {input_file}")
+            console.print(f"[bold]Model:[/bold] {model}")
+            if language:
+                console.print(f"[bold]Language:[/bold] {language}")
+            if device:
+                console.print(f"[bold]Device:[/bold] {device}")
 
         segments = transcribe(
             input_file,
@@ -143,10 +176,12 @@ def main(
             compute_type=compute_type,
             diarize=diarize,
             hf_token=hf_token,
+            verbose=verbose,
         )
 
         write_srt(segments, output_path)
-        console.print(f"[green]Wrote subtitles to:[/green] {output_path}")
+        if not quiet:
+            console.print(f"[green]Wrote subtitles to:[/green] {output_path}")
 
         if caption:
             transcript = " ".join(str(segment.get("text", "")).strip() for segment in segments)
@@ -157,7 +192,8 @@ def main(
             )
             caption_path = output_path.with_suffix(".caption.txt")
             caption_path.write_text(caption_text, encoding="utf-8")
-            console.print(f"[green]Wrote caption to:[/green] {caption_path}")
+            if not quiet:
+                console.print(f"[green]Wrote caption to:[/green] {caption_path}")
     except (ValueError, FileNotFoundError, ConnectionError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=1) from exc
