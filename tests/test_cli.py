@@ -67,7 +67,7 @@ def test_cli_version_long():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
     assert "subeng" in result.output
-    assert "0.1.1" in result.output
+    assert "0.1.2" in result.output
 
 
 def test_cli_version_short():
@@ -79,7 +79,7 @@ def test_cli_version_short():
 def test_cli_version_no_extra_output():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert result.output.strip() == "subeng 0.1.1"
+    assert result.output.strip() == "subeng 0.1.2"
 
 
 def test_cli_quiet_hides_status_but_keeps_errors(tmp_path: Path):
@@ -145,3 +145,28 @@ def test_main_entry_runs_typer_app_for_transcription():
         with patch.object(sys, "argv", ["subeng", "video.mp4"]):
             main_entry()
         mock_app.assert_called_once()
+
+
+def test_cli_preset_shortform_accepted(tmp_path: Path):
+    media = tmp_path / "video.mp4"
+    media.write_bytes(b"fake")
+    result = runner.invoke(app, [str(media), "--preset", "shortform"])
+    # Validation passes; transcription fails because the file is fake.
+    assert result.exit_code != 0
+    assert "Preset: shortform" in result.output
+
+
+def test_cli_preset_longform_accepted(tmp_path: Path):
+    media = tmp_path / "video.mp4"
+    media.write_bytes(b"fake")
+    result = runner.invoke(app, [str(media), "--preset", "longform"])
+    assert result.exit_code != 0
+    assert "Preset: longform" in result.output
+
+
+def test_cli_invalid_preset_rejected(tmp_path: Path):
+    media = tmp_path / "video.mp4"
+    media.write_bytes(b"fake")
+    result = runner.invoke(app, [str(media), "--preset", "invalid"])
+    assert result.exit_code != 0
+    assert "Unknown preset" in result.output

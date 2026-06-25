@@ -39,7 +39,13 @@ subeng video.mp4 --device cpu
 subeng video.mp4 --diarize --hf-token $HF_TOKEN
 
 # Generate a caption from the transcript using Ollama
-subeng video.mp4 --caption --ollama-model qwen3.5:0.8b
+subeng video.mp4 --caption --ollama-model qwen3.5:0.6b
+
+# Short-form subtitles (2-5 words per line, default)
+subeng video.mp4 --preset shortform
+
+# Long-form subtitles (10-14 words per line)
+subeng video.mp4 --preset longform
 ```
 
 ## Options
@@ -57,6 +63,7 @@ subeng video.mp4 --caption --ollama-model qwen3.5:0.8b
 | `--caption` | Generate a caption from the transcript via Ollama |
 | `--ollama-model` | Ollama model name (required with `--caption`) |
 | `--ollama-host` | Ollama API host (default: `http://localhost:11434`) |
+| `--preset`, `-p` | Subtitle style: `shortform` (2-5 words, default) or `longform` (10-14 words) |
 
 ## Development
 

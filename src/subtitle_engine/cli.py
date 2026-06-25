@@ -9,6 +9,7 @@ from rich.console import Console
 
 from subtitle_engine import __version__
 from subtitle_engine.captioner import generate_caption
+from subtitle_engine.segmenter import VALID_PRESETS, split_segments
 from subtitle_engine.srt_writer import write_srt
 from subtitle_engine.transcriber import transcribe
 from subtitle_engine.updater import UpdateCheckError, check_for_update, update_package
@@ -162,6 +163,14 @@ def main(
             envvar="OLLAMA_HOST",
         ),
     ] = "http://localhost:11434",
+    preset: Annotated[
+        str,
+        typer.Option(
+            "--preset",
+            "-p",
+            help="Subtitle style: shortform (2-5 words) or longform (10-14 words).",
+        ),
+    ] = "shortform",
     quiet: Annotated[
         bool,
         typer.Option(
@@ -190,6 +199,10 @@ def main(
 ) -> None:
     """Generate SRT subtitles from a media file."""
     try:
+        if preset not in VALID_PRESETS:
+            valid = ", ".join(sorted(VALID_PRESETS))
+            raise ValueError(f"Unknown preset '{preset}'. Choose from: {valid}")
+
         validate_media_file(input_file)
         output_path = resolve_output_path(input_file, output)
 
@@ -208,6 +221,7 @@ def main(
         if not quiet:
             console.print(f"[bold]Transcribing:[/bold] {input_file}")
             console.print(f"[bold]Model:[/bold] {model}")
+            console.print(f"[bold]Preset:[/bold] {preset}")
             if language:
                 console.print(f"[bold]Language:[/bold] {language}")
             if device:
@@ -225,6 +239,7 @@ def main(
             verbose=verbose,
         )
 
+        segments = split_segments(segments, preset=preset)
         write_srt(segments, output_path)
         if not quiet:
             console.print(f"[green]Wrote subtitles to:[/green] {output_path}")
