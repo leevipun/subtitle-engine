@@ -1,5 +1,6 @@
 """Command-line interface for subtitle-engine."""
 
+import sys
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -10,6 +11,7 @@ from subtitle_engine import __version__
 from subtitle_engine.captioner import generate_caption
 from subtitle_engine.srt_writer import write_srt
 from subtitle_engine.transcriber import transcribe
+from subtitle_engine.updater import UpdateCheckError, check_for_update, update_package
 from subtitle_engine.utils import resolve_output_path, validate_media_file
 
 app = typer.Typer(
@@ -25,7 +27,42 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-@app.command()
+def update() -> None:
+    """Update subeng to the latest version from PyPI."""
+    try:
+        update_info = check_for_update(force=True)
+    except UpdateCheckError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if update_info is None:
+        console.print(f"[green]subeng is up to date ({__version__}).[/green]")
+        return
+
+    console.print(
+        f"[bold]A new version is available:[/bold] "
+        f"{update_info.current} → {update_info.latest}"
+    )
+    console.print("[bold]Updating...[/bold]")
+    try:
+        update_package()
+    except UpdateCheckError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print("[green]Update complete.[/green]")
+
+
+def main_entry() -> None:
+    """Route ``subeng update`` to the updater; otherwise run the Typer app."""
+    if len(sys.argv) > 1 and sys.argv[1] == "update":
+        update()
+    else:
+        app()
+
+
+@app.command(
+    epilog="Run 'subeng update' to update to the latest version.",
+)
 def main(
     input_file: Annotated[
         Path,
@@ -160,6 +197,15 @@ def main(
             raise ValueError("--ollama-model is required when using --caption")
 
         if not quiet:
+            update_info = check_for_update()
+            if update_info:
+                console.print(
+                    f"[yellow]A new version of subeng is available:[/yellow] "
+                    f"{update_info.current} → {update_info.latest}. "
+                    f"Run [bold]subeng update[/bold] to install it."
+                )
+
+        if not quiet:
             console.print(f"[bold]Transcribing:[/bold] {input_file}")
             console.print(f"[bold]Model:[/bold] {model}")
             if language:
@@ -203,4 +249,4 @@ def main(
 
 
 if __name__ == "__main__":
-    app()
+    main_entry()
