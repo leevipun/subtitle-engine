@@ -4,7 +4,9 @@ venv/
 env/
 .pypirc
 .env*
-
+# Transcription testing files
+*.MOV
+*.srt
 # Python cache
 __pycache__/
 *.py[cod]

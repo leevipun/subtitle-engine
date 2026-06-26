@@ -1,19 +1,29 @@
 """Command-line interface for subtitle-engine."""
 
 import sys
+import threading
+import time
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Callable, Optional
 
 import questionary
 import requests
 import typer
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 
 from subtitle_engine import __version__
 from subtitle_engine.captioner import generate_caption, list_models
 from subtitle_engine.segmenter import VALID_PRESETS, split_segments
 from subtitle_engine.srt_writer import extract_text_from_srt, write_srt
-from subtitle_engine.transcriber import transcribe
+from subtitle_engine.transcriber import get_last_audio_duration, transcribe
 from subtitle_engine.updater import UpdateCheckError, check_for_update, update_package
 from subtitle_engine.utils import resolve_output_path, validate_media_file
 
@@ -22,6 +32,131 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+# Stage weights for the overall progress bar. The transcribe stage dominates
+# so the bar moves most of its life during actual inference. These are rough
+# defaults; adjust here if real-world profiling says otherwise.
+_PROGRESS_STAGES: tuple[tuple[str, int], ...] = (
+    ("loading_audio", 1),
+    ("loading_model", 4),
+    ("transcribing", 85),
+    ("aligning", 7),
+    ("diarizing", 3),
+)
+_PROGRESS_STAGE_WEIGHTS: dict[str, int] = dict(_PROGRESS_STAGES)
+_PROGRESS_STAGE_CUMULATIVE: dict[str, float] = {}
+_running = 0.0
+for _name, _weight in _PROGRESS_STAGES:
+    _PROGRESS_STAGE_CUMULATIVE[_name] = _running
+    _running += _weight
+_PROGRESS_STAGE_TOTAL = _running
+
+_PROGRESS_DONE_LABEL = "Done"
+_PROGRESS_FAILED_LABEL = "Failed"
+
+# How long a stage can go without a callback before we add a throughput hint
+# to the description. The bar still shows the *true* percentage; this just
+# keeps the user informed that the process is alive during long stalls
+# (e.g. WhisperX fires its transcribe callback only once per VAD segment).
+_STALL_HINT_AFTER_SECONDS = 1.5
+_STALL_TICK_SECONDS = 0.5
+
+
+def _stage_display_name(stage: str) -> str:
+    """Format a stage label for display in the progress bar."""
+    if stage == "done":
+        return _PROGRESS_DONE_LABEL
+    return stage.replace("_", " ").capitalize()
+
+
+def _format_throughput(processing_seconds: float, audio_seconds: float) -> str:
+    """Return a compact ``Nx realtime`` hint for the stage label."""
+    if processing_seconds <= 0 or audio_seconds <= 0:
+        return ""
+    ratio = audio_seconds / processing_seconds
+    return f"{ratio:.1f}x realtime"
+
+
+def _make_progress_callback(
+    progress: Progress,
+    task_id,
+    stall_state: dict,
+) -> Callable[[str, float], None]:
+    """Build a (stage, fraction) -> None callback that drives ``progress``.
+
+    ``stall_state`` is a shared dict the stall watcher reads to decide when to
+    annotate a long-running stage with throughput information.
+    """
+
+    def callback(stage: str, fraction: float) -> None:
+        if stage == "done":
+            completed = _PROGRESS_STAGE_TOTAL
+        else:
+            base = _PROGRESS_STAGE_CUMULATIVE.get(stage, 0.0)
+            weight = _PROGRESS_STAGE_WEIGHTS.get(stage, 0)
+            # Clamp so the bar can never report more than 100% before the
+            # pipeline actually completes.
+            completed = min(base + max(0.0, min(fraction, 1.0)) * weight, 99.0)
+        stall_state["stage"] = stage
+        stall_state["stage_started_at"] = time.monotonic()
+        stall_state["last_fraction"] = fraction
+        progress.update(
+            task_id,
+            completed=completed,
+            description=_stage_display_name(stage),
+        )
+
+    return callback
+
+
+def _start_stall_watcher(
+    progress: Progress,
+    task_id,
+    stall_state: dict,
+    stop_event: threading.Event,
+) -> threading.Thread:
+    """Start a background thread that annotates long-stalled stages.
+
+    The watcher only updates the *description*; the bar's *completed* value
+    keeps reflecting the true (last-reported) progress so we never lie about
+    how much of the work is actually done.
+    """
+
+    def run() -> None:
+        while not stop_event.is_set():
+            stop_event.wait(_STALL_TICK_SECONDS)
+            if stop_event.is_set():
+                return
+            stage = stall_state.get("stage")
+            if not stage or stage in ("done", "loading_audio", "loading_model"):
+                continue
+            started = stall_state.get("stage_started_at")
+            if started is None:
+                continue
+            elapsed = time.monotonic() - started
+            if elapsed < _STALL_HINT_AFTER_SECONDS:
+                continue
+            # Re-read on every tick: the audio duration is published by
+            # ``transcribe`` *after* this thread starts, so we have to keep
+            # polling for it to get a throughput ratio instead of a plain
+            # seconds counter.
+            audio_duration = get_last_audio_duration() or 0.0
+            hint = _format_throughput(elapsed, audio_duration)
+            base_label = _stage_display_name(stage)
+            if hint:
+                new_description = f"{base_label} ({hint})"
+            else:
+                new_description = f"{base_label} ({elapsed:.0f}s)"
+            try:
+                progress.update(task_id, description=new_description)
+            except Exception:  # noqa: BLE001
+                # The bar may have closed if the user hit Ctrl-C; ignore.
+                return
+
+    thread = threading.Thread(target=run, daemon=True, name="stall-watcher")
+    thread.start()
+    return thread
 
 
 def _select_ollama_model(host: str) -> str:
@@ -266,17 +401,71 @@ def main(
             if device:
                 console.print(f"[bold]Device:[/bold] {device}")
 
-        segments = transcribe(
-            input_file,
-            model_name=model,
-            language=language,
-            device=device,
-            batch_size=batch_size,
-            compute_type=compute_type,
-            diarize=diarize,
-            hf_token=hf_token,
-            verbose=verbose,
-        )
+        if quiet:
+            segments = transcribe(
+                input_file,
+                model_name=model,
+                language=language,
+                device=device,
+                batch_size=batch_size,
+                compute_type=compute_type,
+                diarize=diarize,
+                hf_token=hf_token,
+                verbose=verbose,
+            )
+        else:
+            # Build a Console that targets the *original* stdout. The
+            # transcriber's ``_suppress_external_output`` swaps ``sys.stdout``
+            # for a buffer to hide WhisperX noise, and Rich's default Console
+            # follows ``sys.stdout``, which would make the bar invisible. By
+            # capturing the file beforehand we keep the bar visible on the
+            # terminal while the noise still gets swallowed.
+            progress_console = Console(file=sys.stdout, force_terminal=True)
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(bar_width=30),
+                TaskProgressColumn(),
+                TimeElapsedColumn(),
+                console=progress_console,
+                transient=True,
+            ) as progress:
+                task_id = progress.add_task("Starting", total=_PROGRESS_STAGE_TOTAL)
+                stall_state: dict = {"stage": None, "stage_started_at": None}
+                stop_event = threading.Event()
+                _start_stall_watcher(progress, task_id, stall_state, stop_event)
+                progress_callback = _make_progress_callback(
+                    progress, task_id, stall_state
+                )
+                try:
+                    segments = transcribe(
+                        input_file,
+                        model_name=model,
+                        language=language,
+                        device=device,
+                        batch_size=batch_size,
+                        compute_type=compute_type,
+                        diarize=diarize,
+                        hf_token=hf_token,
+                        verbose=verbose,
+                        progress_callback=progress_callback,
+                    )
+                except Exception:
+                    stop_event.set()
+                    progress.update(
+                        task_id,
+                        description=_PROGRESS_FAILED_LABEL,
+                        completed=_PROGRESS_STAGE_TOTAL,
+                    )
+                    # Switch off transient so the failed bar remains visible.
+                    progress.transient = False
+                    raise
+                stop_event.set()
+                progress.update(
+                    task_id,
+                    completed=_PROGRESS_STAGE_TOTAL,
+                    description=_PROGRESS_DONE_LABEL,
+                )
 
         splitted_segments = split_segments(segments, preset=preset)
         write_srt(splitted_segments, output_path)

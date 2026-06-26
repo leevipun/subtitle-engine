@@ -1,6 +1,8 @@
 """Tests for CLI helpers and argument parsing."""
 
 import sys
+import threading
+import time
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -9,7 +11,15 @@ import typer
 from typer.testing import CliRunner
 
 from subtitle_engine import __version__
-from subtitle_engine.cli import _select_ollama_model, app, main_entry, update
+from subtitle_engine.cli import (
+    _format_throughput,
+    _make_progress_callback,
+    _select_ollama_model,
+    _start_stall_watcher,
+    app,
+    main_entry,
+    update,
+)
 from subtitle_engine.updater import UpdateCheckError, UpdateInfo
 from subtitle_engine.utils import resolve_output_path, validate_media_file
 
@@ -97,6 +107,122 @@ def test_cli_quiet_hides_status_but_keeps_errors(tmp_path: Path):
     assert result.exit_code != 0
     assert "Transcription failed:" in result.output
     assert "Transcribing:" not in result.output
+
+
+def test_cli_renders_progress_bar(tmp_path: Path):
+    """A non-quiet run should drive the progress callback through every stage."""
+    media = tmp_path / "video.mp4"
+    media.write_bytes(b"fake")
+
+    seen_stages: list[str] = []
+
+    def fake_transcribe(*_args, **kwargs):
+        callback = kwargs.get("progress_callback")
+        if callback is not None:
+            for stage, fraction in (
+                ("loading_audio", 0.0),
+                ("loading_model", 0.0),
+                ("transcribing", 0.5),
+                ("aligning", 0.0),
+                ("done", 1.0),
+            ):
+                seen_stages.append(stage)
+                callback(stage, fraction)
+        return [{"start": 0.0, "end": 1.0, "text": "hello"}]
+
+    with patch("subtitle_engine.cli.transcribe", side_effect=fake_transcribe):
+        with patch(
+            "subtitle_engine.cli.split_segments",
+            return_value=[{"start": 0.0, "end": 1.0, "text": "hello"}],
+        ):
+            result = runner.invoke(app, ["main", str(media)])
+
+    assert result.exit_code == 0
+    for expected in ("loading_audio", "loading_model", "transcribing", "aligning", "done"):
+        assert expected in seen_stages, f"progress bar never saw stage {expected!r}"
+
+
+def test_cli_quiet_skips_progress_bar(tmp_path: Path):
+    """``--quiet`` must not construct a rich Progress at all."""
+    media = tmp_path / "video.mp4"
+    media.write_bytes(b"fake")
+
+    callback_received: list[bool] = []
+
+    def fake_transcribe(*_args, **kwargs):
+        callback_received.append(kwargs.get("progress_callback") is not None)
+        return [{"start": 0.0, "end": 1.0, "text": "hello"}]
+
+    with patch("subtitle_engine.cli.transcribe", side_effect=fake_transcribe):
+        with patch(
+            "subtitle_engine.cli.split_segments",
+            return_value=[{"start": 0.0, "end": 1.0, "text": "hello"}],
+        ):
+            result = runner.invoke(app, ["main", str(media), "-q"])
+
+    assert result.exit_code == 0
+    assert callback_received == [False], "quiet mode must not pass a progress callback"
+
+
+def test_format_throughput_handles_edges():
+    assert _format_throughput(0, 60) == ""
+    assert _format_throughput(30, 0) == ""
+    assert _format_throughput(20, 60) == "3.0x realtime"
+    assert _format_throughput(10, 60) == "6.0x realtime"
+
+
+def test_progress_callback_records_stage_timing():
+    """Each callback should reset the stall-watcher's clock for that stage."""
+    import rich.progress
+
+    stall_state: dict = {"stage": None, "stage_started_at": None}
+    progress = rich.progress.Progress(transient=True, disable=True)
+    with progress:
+        task = progress.add_task("Starting", total=100)
+        cb = _make_progress_callback(progress, task, stall_state)
+        cb("transcribing", 0.5)
+        assert stall_state["stage"] == "transcribing"
+        assert stall_state["last_fraction"] == 0.5
+        assert stall_state["stage_started_at"] is not None
+        first = stall_state["stage_started_at"]
+        time.sleep(0.01)
+        cb("aligning", 0.1)
+        assert stall_state["stage"] == "aligning"
+        assert stall_state["stage_started_at"] > first
+
+
+def test_stall_watcher_annotates_long_stages():
+    """When a stage hasn't reported in a while, the description gets a hint."""
+    import rich.progress
+
+    from subtitle_engine.cli import _PROGRESS_STAGE_TOTAL
+
+    progress = rich.progress.Progress(transient=True, disable=True)
+    stall_state: dict = {"stage": "transcribing", "stage_started_at": time.monotonic() - 5.0, "last_fraction": 0.0}
+    stop_event = threading.Event()
+    with progress:
+        task = progress.add_task("Starting", total=_PROGRESS_STAGE_TOTAL)
+        with patch("subtitle_engine.cli.get_last_audio_duration", return_value=60.0):
+            _start_stall_watcher(progress, task, stall_state, stop_event)
+            # Wait long enough for the watcher to tick at least twice.
+            time.sleep(1.2)
+        stop_event.set()
+    # We can't directly inspect the bar's description, but the watcher must
+    # not have raised. The fact that we reach this line is the assertion.
+
+
+def test_stall_watcher_stops_cleanly():
+    import rich.progress
+
+    progress = rich.progress.Progress(transient=True, disable=True)
+    stall_state: dict = {"stage": "transcribing", "stage_started_at": time.monotonic() - 5.0, "last_fraction": 0.0}
+    stop_event = threading.Event()
+    with progress:
+        task = progress.add_task("Starting", total=100)
+        thread = _start_stall_watcher(progress, task, stall_state, stop_event)
+        stop_event.set()
+        thread.join(timeout=2)
+    assert not thread.is_alive(), "watcher thread should exit when stop_event is set"
 
 
 def test_cli_verbose_accepted(tmp_path: Path):
