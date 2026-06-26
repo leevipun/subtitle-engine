@@ -1,5 +1,7 @@
 # subtitle-engine
 
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/subtitle-engine?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/subtitle-engine)
+
 Generate `.srt` subtitle files from audio or video files using [WhisperX](https://github.com/m-bain/whisperX). Optionally generate a caption from the transcript with a local [Ollama](https://ollama.com/) LLM.
 
 ## Installation
