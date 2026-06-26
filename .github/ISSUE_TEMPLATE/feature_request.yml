@@ -1,0 +1,44 @@
+name: Feature request
+description: Suggest an improvement for subtitle-engine.
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement.
+
+        Please describe the problem you are trying to solve and the outcome you
+        want.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What is missing or difficult today?
+      placeholder: Describe the workflow, pain point, or need.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like to happen?
+      placeholder: Describe the behavior, CLI option, or feature you want.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Have you tried any workarounds or alternative approaches?
+  - type: textarea
+    id: examples
+    attributes:
+      label: Examples or references
+      description: Link related tools, screenshots, or prior art if helpful.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add any extra context here.
