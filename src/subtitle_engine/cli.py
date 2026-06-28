@@ -21,7 +21,13 @@ from rich.progress import (
 
 from subtitle_engine import __version__
 from subtitle_engine.captioner import generate_caption, list_models
-from subtitle_engine.segmenter import VALID_PRESETS, split_segments
+from subtitle_engine.segmenter import (
+    DEFAULT_MAX_CPS,
+    DEFAULT_MIN_DURATION,
+    SENTENCE_PAUSE_THRESHOLD,
+    VALID_PRESETS,
+    split_segments,
+)
 from subtitle_engine.srt_writer import extract_text_from_srt, write_srt
 from subtitle_engine.transcriber import get_last_audio_duration, transcribe
 from subtitle_engine.updater import UpdateCheckError, check_for_update, update_package
@@ -345,6 +351,83 @@ def main(
             help="Subtitle style: shortform (2-5 words) or longform (10-14 words).",
         ),
     ] = "shortform",
+    no_cleanup: Annotated[
+        bool,
+        typer.Option(
+            "--no-cleanup",
+            help="Disable hallucination cleanup (e.g. 'Thanks for watching', [Music]).",
+        ),
+    ] = False,
+    no_clause_boundaries: Annotated[
+        bool,
+        typer.Option(
+            "--no-clause-boundaries",
+            help="Disable clause-aware line breaking.",
+        ),
+    ] = False,
+    no_sentence_split: Annotated[
+        bool,
+        typer.Option(
+            "--no-sentence-split",
+            help=(
+                "Disable splitting at sentence boundaries (. ! ?). "
+                "When off, a subtitle will not contain a stranded period "
+                "in the middle (e.g. 'mission. Building in public' becomes "
+                "'mission.' / 'Building in public'). Known abbreviations "
+                "(Mr., Dr., U.S., e.g., …) are skipped."
+            ),
+        ),
+    ] = False,
+    sentence_pause_threshold: Annotated[
+        float,
+        typer.Option(
+            "--sentence-pause-threshold",
+            help=(
+                "Minimum gap (seconds) between a period-ending word and the "
+                "next word for the gap to count as evidence of a real "
+                "sentence boundary. Lower = more aggressive splitting. "
+                "Set to 0 to require a capital letter or speaker change."
+            ),
+            min=0.0,
+        ),
+    ] = SENTENCE_PAUSE_THRESHOLD,
+    no_line_balance: Annotated[
+        bool,
+        typer.Option(
+            "--no-line-balance",
+            help="Disable two-line balancing (enabled by default for longform).",
+        ),
+    ] = False,
+    max_cps: Annotated[
+        float,
+        typer.Option(
+            "--max-cps",
+            help="Maximum characters per second per subtitle. Use 0 to disable.",
+            min=0.0,
+        ),
+    ] = DEFAULT_MAX_CPS,
+    no_cps_limit: Annotated[
+        bool,
+        typer.Option(
+            "--no-cps-limit",
+            help="Disable the characters-per-second post-processor.",
+        ),
+    ] = False,
+    min_duration: Annotated[
+        float,
+        typer.Option(
+            "--min-duration",
+            help="Minimum on-screen duration per subtitle, in seconds. Use 0 to disable.",
+            min=0.0,
+        ),
+    ] = DEFAULT_MIN_DURATION,
+    no_min_duration: Annotated[
+        bool,
+        typer.Option(
+            "--no-min-duration",
+            help="Disable the minimum-duration post-processor.",
+        ),
+    ] = False,
     quiet: Annotated[
         bool,
         typer.Option(
@@ -467,7 +550,19 @@ def main(
                     description=_PROGRESS_DONE_LABEL,
                 )
 
-        splitted_segments = split_segments(segments, preset=preset)
+        splitted_segments = split_segments(
+            segments,
+            preset=preset,
+            cleanup=not no_cleanup,
+            use_clause_boundaries=not no_clause_boundaries,
+            split_at_sentences=not no_sentence_split,
+            sentence_pause_threshold=sentence_pause_threshold,
+            balance_lines=not no_line_balance,
+            max_cps=max_cps,
+            min_duration=min_duration,
+            enforce_cps=not no_cps_limit,
+            enforce_min_duration=not no_min_duration,
+        )
         write_srt(splitted_segments, output_path)
         if not quiet:
             console.print(f"[green]Wrote subtitles to:[/green] {output_path}")

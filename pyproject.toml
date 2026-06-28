@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "subtitle-engine"
-version = "0.1.5"
+version = "0.2.0"
 description = "Generate SRT subtitles from audio/video files using WhisperX"
 readme = "README.md"
 license = "MIT"

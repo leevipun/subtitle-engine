@@ -53,6 +53,37 @@ subeng video.mp4 --preset shortform
 subeng video.mp4 --preset longform
 ```
 
+## Subtitle quality
+
+The segmenter applies several quality passes by default. Each can be turned off
+or tuned via a CLI flag.
+
+| Pass | Default | Flag to disable | Flag to tune |
+|------|---------|-----------------|--------------|
+| Hallucination cleanup (`Thanks for watching`, `[Music]`, `Subtitles by …`) | on | `--no-cleanup` | — |
+| Clause-aware line breaking (prefer splits at `,` `.` `?` `!` `;` `:`) | on | `--no-clause-boundaries` | — |
+| Sentence-boundary splitting (split at `.` `?` `!` when at least one of: next word capitalized, ≥ 0.2s pause after, or speaker change) | on | `--no-sentence-split` | `--sentence-pause-threshold 0.3` |
+| Two-line balancing (longform only — splits long lines at the midpoint clause) | on (longform) | `--no-line-balance` | — |
+| Characters-per-second limit | 21 cps | `--no-cps-limit` | `--max-cps 17` |
+| Minimum on-screen duration | 1.0 s | `--no-min-duration` | `--min-duration 1.5` |
+
+The sentence splitter now considers context before splitting, so a mid-thought
+period like `I found a bug. reports say...` stays in the same subtitle
+(no capital, no pause, no speaker change → no split). To get the old
+aggressive behavior back, set `--sentence-pause-threshold 0`.
+
+Disable every quality pass to reproduce the legacy behavior:
+
+```bash
+subeng video.mp4 \
+  --no-cleanup \
+  --no-clause-boundaries \
+  --no-sentence-split \
+  --no-line-balance \
+  --no-cps-limit \
+  --no-min-duration
+```
+
 ## Options
 
 | Option | Description |
@@ -70,6 +101,15 @@ subeng video.mp4 --preset longform
 | `--ollama-host` | Ollama API host (default: `http://localhost:11434`) |
 | `caption` | Generate a caption from an existing SRT file (e.g. `subeng caption file.srt`) |
 | `--preset`, `-p` | Subtitle style: `shortform` (2-5 words, default) or `longform` (10-14 words) |
+| `--no-cleanup` | Disable hallucination cleanup (e.g. `Thanks for watching`, `[Music]`) |
+| `--no-clause-boundaries` | Disable clause-aware line breaking |
+| `--no-sentence-split` | Disable sentence-boundary splitting (so `mission. Building in public` stays as one subtitle) |
+| `--sentence-pause-threshold <float>` | Minimum pause (seconds) after a period for the gap to count as evidence of a real sentence boundary (default: 0.2). Set to `0` to rely on capital letters / speaker change only. |
+| `--no-line-balance` | Disable two-line balancing (enabled by default for longform) |
+| `--max-cps <float>` | Maximum characters per second per subtitle (default: 21). Use `0` to disable. |
+| `--no-cps-limit` | Disable the CPS post-processor |
+| `--min-duration <float>` | Minimum on-screen duration in seconds (default: 1.0). Use `0` to disable. |
+| `--no-min-duration` | Disable the minimum-duration post-processor |
 
 ## Development
 
