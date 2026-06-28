@@ -406,3 +406,180 @@ def test_caption_command_rejects_non_srt_input(tmp_path: Path):
     result = runner.invoke(app, ["caption", str(video), "--ollama-model", "llama3.2"])
     assert result.exit_code != 0
     assert "expects an .srt file" in result.output
+
+
+# --- --burn ----------------------------------------------------------------
+
+
+def test_cli_burn_calls_burner_and_prints_output(tmp_path: Path):
+    media = tmp_path / "video.mp4"
+    media.write_bytes(b"fake")
+    with patch("subtitle_engine.cli.transcribe", return_value=[{"start": 0.0, "end": 1.0, "text": "hi"}]):
+        with patch(
+            "subtitle_engine.cli.split_segments",
+            return_value=[{"start": 0.0, "end": 1.0, "text": "hi"}],
+        ):
+            with patch("subtitle_engine.cli.burn_subtitles") as mock_burn:
+                result = runner.invoke(app, ["main", str(media), "--burn"])
+    assert result.exit_code == 0
+    mock_burn.assert_called_once()
+    args, kwargs = mock_burn.call_args
+    assert args[0] == media
+    assert args[1] == tmp_path / "video.srt"
+    assert args[2] == tmp_path / "video.subtitled.mp4"
+    assert "Wrote burned video" in result.output
+
+
+def test_cli_burn_passes_style_file_through(tmp_path: Path):
+    media = tmp_path / "video.mp4"
+    media.write_bytes(b"fake")
+    style = tmp_path / "style.ass"
+    style.write_text("Style: Default,Arial,24,&H00FFFFFF\n", encoding="utf-8")
+    with patch("subtitle_engine.cli.transcribe", return_value=[{"start": 0.0, "end": 1.0, "text": "hi"}]):
+        with patch(
+            "subtitle_engine.cli.split_segments",
+            return_value=[{"start": 0.0, "end": 1.0, "text": "hi"}],
+        ):
+            with patch("subtitle_engine.cli.burn_subtitles") as mock_burn:
+                result = runner.invoke(
+                    app,
+                    ["main", str(media), "--burn", "--style-file", str(style)],
+                )
+    assert result.exit_code == 0
+    args, kwargs = mock_burn.call_args
+    assert kwargs.get("style_file") == style or args[3] == style
+
+
+def test_cli_burn_audio_only_reports_failure(tmp_path: Path):
+    """--burn on an audio file surfaces the BurnError; the SRT is still written."""
+    media = tmp_path / "podcast.mp3"
+    media.write_bytes(b"fake")
+    from subtitle_engine.burner import BurnError
+
+    with patch("subtitle_engine.cli.transcribe", return_value=[{"start": 0.0, "end": 1.0, "text": "hi"}]):
+        with patch(
+            "subtitle_engine.cli.split_segments",
+            return_value=[{"start": 0.0, "end": 1.0, "text": "hi"}],
+        ):
+            with patch(
+                "subtitle_engine.cli.burn_subtitles",
+                side_effect=BurnError("Input has no video stream"),
+            ):
+                result = runner.invoke(app, ["main", str(media), "--burn"])
+    assert result.exit_code != 0
+    assert "Burn failed" in result.output
+    assert "Input has no video stream" in result.output
+    # The SRT must still exist; the burn failure does not delete it.
+    assert (tmp_path / "podcast.srt").exists()
+    assert "SRT is still available" in result.output
+
+
+def test_cli_burn_rejects_non_ass_style_file(tmp_path: Path):
+    media = tmp_path / "video.mp4"
+    media.write_bytes(b"fake")
+    bogus = tmp_path / "style.txt"
+    bogus.write_text("not ass", encoding="utf-8")
+    with patch("subtitle_engine.cli.transcribe", return_value=[{"start": 0.0, "end": 1.0, "text": "hi"}]):
+        with patch(
+            "subtitle_engine.cli.split_segments",
+            return_value=[{"start": 0.0, "end": 1.0, "text": "hi"}],
+        ):
+            result = runner.invoke(
+                app,
+                ["main", str(media), "--burn", "--style-file", str(bogus)],
+            )
+    assert result.exit_code != 0
+    assert "expects an .ass file" in result.output
+
+
+def test_cli_burn_quiet_skips_burn_progress(tmp_path: Path):
+    media = tmp_path / "video.mp4"
+    media.write_bytes(b"fake")
+    with patch("subtitle_engine.cli.transcribe", return_value=[{"start": 0.0, "end": 1.0, "text": "hi"}]):
+        with patch(
+            "subtitle_engine.cli.split_segments",
+            return_value=[{"start": 0.0, "end": 1.0, "text": "hi"}],
+        ):
+            with patch("subtitle_engine.cli.burn_subtitles") as mock_burn:
+                result = runner.invoke(app, ["main", str(media), "--burn", "-q"])
+    assert result.exit_code == 0
+    args, kwargs = mock_burn.call_args
+    assert kwargs.get("progress_callback") is None
+    assert "Wrote burned video" not in result.output
+
+
+def test_cli_burn_forwards_progress_callback_to_burner(tmp_path: Path):
+    """Non-quiet runs must wire the Rich progress callback into burn_subtitles."""
+    media = tmp_path / "video.mp4"
+    media.write_bytes(b"fake")
+    with patch("subtitle_engine.cli.transcribe", return_value=[{"start": 0.0, "end": 1.0, "text": "hi"}]):
+        with patch(
+            "subtitle_engine.cli.split_segments",
+            return_value=[{"start": 0.0, "end": 1.0, "text": "hi"}],
+        ):
+            with patch("subtitle_engine.cli.burn_subtitles") as mock_burn:
+                result = runner.invoke(app, ["main", str(media), "--burn"])
+    assert result.exit_code == 0
+    _, kwargs = mock_burn.call_args
+    assert kwargs.get("progress_callback") is not None
+    # And the callback must accept (stage, fraction) and be safe to invoke
+    # at the boundaries — that's the contract burn_subtitles depends on.
+    cb = kwargs["progress_callback"]
+    cb("burning", 0.0)
+    cb("burning", 1.0)
+
+
+def test_cli_burn_progress_callback_advances_bar_past_diarizing(tmp_path: Path):
+    """The bar must keep moving while the burn runs (cumulative > old total)."""
+    import rich.progress
+
+    from subtitle_engine.cli import _PROGRESS_STAGE_TOTAL
+
+    media = tmp_path / "video.mp4"
+    media.write_bytes(b"fake")
+
+    captured: list[float] = []
+
+    def fake_burn(*_args, **kwargs):
+        cb = kwargs.get("progress_callback")
+        if cb is None:
+            return
+        # Drive the callback through the full burning range. The bar's
+        # ``completed`` value must be strictly increasing for the user
+        # to see the bar move.
+        for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+            cb("burning", fraction)
+
+    progress = rich.progress.Progress(transient=True, disable=True)
+    stall_state: dict = {"stage": None, "stage_started_at": None}
+
+    with progress:
+        task = progress.add_task("Starting", total=_PROGRESS_STAGE_TOTAL)
+        cb = _make_progress_callback(progress, task, stall_state)
+        # Simulate "diarizing finished" — bar is at the diarizing cumulative
+        # weight (which is the old total when --burn is off, but lower than
+        # _PROGRESS_STAGE_TOTAL when burning is part of the pipeline).
+        for stage, fraction in (
+            ("loading_audio", 0.0),
+            ("loading_model", 0.0),
+            ("transcribing", 1.0),
+            ("aligning", 1.0),
+            ("diarizing", 1.0),
+        ):
+            cb(stage, fraction)
+        # Now run the burn. Capture every completed value the callback
+        # sends to the bar.
+        for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+            cb("burning", fraction)
+            captured.append(progress.tasks[task].completed)
+
+    assert len(captured) == 5
+    # Each update must be strictly greater than the previous one for the
+    # user to actually see the bar move during the burn.
+    for previous, current in zip(captured, captured[1:]):
+        assert current > previous, (
+            f"Bar did not advance during burn: {previous} -> {current}"
+        )
+    # And the final update must sit at (or just under) the total so the
+    # bar appears to fill up.
+    assert captured[-1] >= _PROGRESS_STAGE_TOTAL - 2.0

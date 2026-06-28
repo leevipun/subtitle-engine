@@ -51,6 +51,12 @@ subeng video.mp4 --preset shortform
 
 # Long-form subtitles (10-14 words per line)
 subeng video.mp4 --preset longform
+
+# Burn subtitles into the video (requires ffmpeg on PATH)
+subeng video.mp4 --burn
+
+# Burn with a custom .ass style file
+subeng video.mp4 --burn --style-file my-style.ass
 ```
 
 ## Subtitle quality
@@ -84,6 +90,29 @@ subeng video.mp4 \
   --no-min-duration
 ```
 
+## Burning subtitles
+
+Pass `--burn` to also re-encode the input video with the generated SRT
+rasterized into the frames (hardsub). The result is written next to the
+original as `<input>.subtitled.<ext>`; the source file is never modified.
+
+```bash
+subeng video.mp4 --burn
+```
+
+Burn requires [ffmpeg](https://ffmpeg.org/) on your `PATH`. Audio is
+stream-copied where possible, so only the video is re-encoded. To apply
+custom styling, point `--style-file` at an `.ass` file; the first
+`Style:` line is converted to ffmpeg's `force_style` argument:
+
+```bash
+subeng video.mp4 --burn --style-file my-style.ass
+```
+
+If the burn step fails (missing ffmpeg, no video stream, ffmpeg error),
+the SRT that was already written is kept on disk and its path is shown
+in the error message.
+
 ## Options
 
 | Option | Description |
@@ -110,6 +139,8 @@ subeng video.mp4 \
 | `--no-cps-limit` | Disable the CPS post-processor |
 | `--min-duration <float>` | Minimum on-screen duration in seconds (default: 1.0). Use `0` to disable. |
 | `--no-min-duration` | Disable the minimum-duration post-processor |
+| `--burn` | Re-encode the input video with the generated SRT burned into the frames. Writes `<input>.subtitled.<ext>` next to the source. Requires ffmpeg on PATH. |
+| `--style-file` | Path to a `.ass` style file used when `--burn` is set. The first `Style:` line is applied via ffmpeg's `force_style`. |
 
 ## Development
 

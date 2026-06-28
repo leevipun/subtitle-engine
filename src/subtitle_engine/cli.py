@@ -20,6 +20,7 @@ from rich.progress import (
 )
 
 from subtitle_engine import __version__
+from subtitle_engine.burner import BurnError, burn_subtitles
 from subtitle_engine.captioner import generate_caption, list_models
 from subtitle_engine.segmenter import (
     DEFAULT_MAX_CPS,
@@ -43,12 +44,16 @@ console = Console()
 # Stage weights for the overall progress bar. The transcribe stage dominates
 # so the bar moves most of its life during actual inference. These are rough
 # defaults; adjust here if real-world profiling says otherwise.
+# The ``burning`` stage is only used when ``--burn`` is supplied; its weight
+# is always part of the total so the bar still tops out at 100% on runs
+# that skip the burn step (the stage simply never fires).
 _PROGRESS_STAGES: tuple[tuple[str, int], ...] = (
     ("loading_audio", 1),
     ("loading_model", 4),
     ("transcribing", 85),
     ("aligning", 7),
     ("diarizing", 3),
+    ("burning", 15),
 )
 _PROGRESS_STAGE_WEIGHTS: dict[str, int] = dict(_PROGRESS_STAGES)
 _PROGRESS_STAGE_CUMULATIVE: dict[str, float] = {}
@@ -101,9 +106,16 @@ def _make_progress_callback(
         else:
             base = _PROGRESS_STAGE_CUMULATIVE.get(stage, 0.0)
             weight = _PROGRESS_STAGE_WEIGHTS.get(stage, 0)
-            # Clamp so the bar can never report more than 100% before the
-            # pipeline actually completes.
-            completed = min(base + max(0.0, min(fraction, 1.0)) * weight, 99.0)
+            # Clamp so the bar can never report 100% before the pipeline
+            # actually completes; the "done" stage is the only event that
+            # is allowed to set the bar to the total. We clamp against the
+            # total itself (not a hard-coded 99) so the new ``burning``
+            # stage — whose cumulative base sits past 100 once the burn is
+            # part of the pipeline — still has room to advance.
+            completed = min(
+                base + max(0.0, min(fraction, 1.0)) * weight,
+                _PROGRESS_STAGE_TOTAL - 1.0,
+            )
         stall_state["stage"] = stage
         stall_state["stage_started_at"] = time.monotonic()
         stall_state["last_fraction"] = fraction
@@ -163,6 +175,88 @@ def _start_stall_watcher(
     thread = threading.Thread(target=run, daemon=True, name="stall-watcher")
     thread.start()
     return thread
+
+
+def _run_post_transcribe(
+    segments,
+    input_file: Path,
+    output_path: Path,
+    *,
+    preset: str,
+    no_cleanup: bool,
+    no_clause_boundaries: bool,
+    no_sentence_split: bool,
+    sentence_pause_threshold: float,
+    no_line_balance: bool,
+    max_cps: float,
+    min_duration: float,
+    no_cps_limit: bool,
+    no_min_duration: bool,
+    burn: bool,
+    style_file: Optional[Path],
+    caption: bool,
+    ollama_model: Optional[str],
+    ollama_host: str,
+    progress_callback: Optional[Callable[[str, float], None]],
+    quiet: bool,
+) -> None:
+    """Split, write the SRT, optionally burn, optionally caption.
+
+    This is a separate function so the burn step can run inside the
+    surrounding Rich progress bar (when one is active). All post-transcribe
+    work funnels through here so the two CLI branches stay in sync.
+    """
+    splitted_segments = split_segments(
+        segments,
+        preset=preset,
+        cleanup=not no_cleanup,
+        use_clause_boundaries=not no_clause_boundaries,
+        split_at_sentences=not no_sentence_split,
+        sentence_pause_threshold=sentence_pause_threshold,
+        balance_lines=not no_line_balance,
+        max_cps=max_cps,
+        min_duration=min_duration,
+        enforce_cps=not no_cps_limit,
+        enforce_min_duration=not no_min_duration,
+    )
+    write_srt(splitted_segments, output_path)
+    if not quiet:
+        console.print(f"[green]Wrote subtitles to:[/green] {output_path}")
+
+    if burn:
+        video_output = input_file.with_name(
+            f"{input_file.stem}.subtitled{input_file.suffix}"
+        )
+        if style_file is not None and style_file.suffix.lower() != ".ass":
+            raise ValueError(
+                f"--style-file expects an .ass file, got '{style_file.suffix}'."
+            )
+        burn_subtitles(
+            input_file,
+            output_path,
+            video_output,
+            style_file=style_file,
+            progress_callback=progress_callback,
+        )
+        if not quiet:
+            console.print(
+                f"[green]Wrote burned video to:[/green] {video_output}"
+            )
+
+    if caption:
+        transcript = " ".join(
+            str(segment.get("text", "")).strip() for segment in splitted_segments
+        )
+        caption_text = generate_caption(
+            transcript,
+            model=ollama_model,
+            host=ollama_host,
+        )
+        caption_path = output_path.with_suffix(".caption.txt")
+        caption_path.write_text(caption_text, encoding="utf-8")
+        if not quiet:
+            console.print(f"[green]Wrote caption to:[/green] {caption_path}")
+
 
 
 def _select_ollama_model(host: str) -> str:
@@ -425,9 +519,34 @@ def main(
         bool,
         typer.Option(
             "--no-min-duration",
-            help="Disable the minimum-duration post-processor.",
+            help="Disable the minimum-duration post-processor",
         ),
     ] = False,
+    burn: Annotated[
+        bool,
+        typer.Option(
+            "--burn",
+            help=(
+                "Re-encode the input video with the generated SRT burned into "
+                "the frames. Writes <input>.subtitled.<ext> next to the source. "
+                "Requires ffmpeg on PATH."
+            ),
+        ),
+    ] = False,
+    style_file: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--style-file",
+            help=(
+                "Path to a .ass style file used when --burn is set. The first "
+                "'Style:' line is applied via ffmpeg's force_style."
+            ),
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ] = None,
     quiet: Annotated[
         bool,
         typer.Option(
@@ -496,6 +615,28 @@ def main(
                 hf_token=hf_token,
                 verbose=verbose,
             )
+            _run_post_transcribe(
+                segments,
+                input_file,
+                output_path,
+                preset=preset,
+                no_cleanup=no_cleanup,
+                no_clause_boundaries=no_clause_boundaries,
+                no_sentence_split=no_sentence_split,
+                sentence_pause_threshold=sentence_pause_threshold,
+                no_line_balance=no_line_balance,
+                max_cps=max_cps,
+                min_duration=min_duration,
+                no_cps_limit=no_cps_limit,
+                no_min_duration=no_min_duration,
+                burn=burn,
+                style_file=style_file,
+                caption=caption,
+                ollama_model=ollama_model,
+                ollama_host=ollama_host,
+                progress_callback=None,
+                quiet=True,
+            )
         else:
             # Build a Console that targets the *original* stdout. The
             # transcriber's ``_suppress_external_output`` swaps ``sys.stdout``
@@ -544,42 +685,46 @@ def main(
                     progress.transient = False
                     raise
                 stop_event.set()
+                # Do NOT mark "Done" here — the burn step (when requested)
+                # still needs the bar to advance. Run the post-transcribe
+                # work inside this block so the user sees the burning
+                # progress on the same bar.
+                _run_post_transcribe(
+                    segments,
+                    input_file,
+                    output_path,
+                    preset=preset,
+                    no_cleanup=no_cleanup,
+                    no_clause_boundaries=no_clause_boundaries,
+                    no_sentence_split=no_sentence_split,
+                    sentence_pause_threshold=sentence_pause_threshold,
+                    no_line_balance=no_line_balance,
+                    max_cps=max_cps,
+                    min_duration=min_duration,
+                    no_cps_limit=no_cps_limit,
+                    no_min_duration=no_min_duration,
+                    burn=burn,
+                    style_file=style_file,
+                    caption=caption,
+                    ollama_model=ollama_model,
+                    ollama_host=ollama_host,
+                    progress_callback=progress_callback,
+                    quiet=False,
+                )
                 progress.update(
                     task_id,
                     completed=_PROGRESS_STAGE_TOTAL,
                     description=_PROGRESS_DONE_LABEL,
                 )
-
-        splitted_segments = split_segments(
-            segments,
-            preset=preset,
-            cleanup=not no_cleanup,
-            use_clause_boundaries=not no_clause_boundaries,
-            split_at_sentences=not no_sentence_split,
-            sentence_pause_threshold=sentence_pause_threshold,
-            balance_lines=not no_line_balance,
-            max_cps=max_cps,
-            min_duration=min_duration,
-            enforce_cps=not no_cps_limit,
-            enforce_min_duration=not no_min_duration,
-        )
-        write_srt(splitted_segments, output_path)
-        if not quiet:
-            console.print(f"[green]Wrote subtitles to:[/green] {output_path}")
-
-        if caption:
-            transcript = " ".join(str(segment.get("text", "")).strip() for segment in splitted_segments)
-            caption_text = generate_caption(
-                transcript,
-                model=ollama_model,
-                host=ollama_host,
-            )
-            caption_path = output_path.with_suffix(".caption.txt")
-            caption_path.write_text(caption_text, encoding="utf-8")
-            if not quiet:
-                console.print(f"[green]Wrote caption to:[/green] {caption_path}")
     except (ValueError, FileNotFoundError, ConnectionError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    except BurnError as exc:
+        console.print(f"[red]Burn failed:[/red] {exc}")
+        if "output_path" in locals() and output_path.exists():
+            console.print(
+                f"[yellow]SRT is still available at:[/yellow] {output_path}"
+            )
         raise typer.Exit(code=1) from exc
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]Transcription failed:[/red] {exc}")
